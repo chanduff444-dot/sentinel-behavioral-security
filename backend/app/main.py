@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from .database import get_db
 from .models import Event, User, Alert
-from .risk import calculate_risk_score
+from .risk import calculate_risk_score, get_risk_config, MEDIUM_THRESHOLD, HIGH_THRESHOLD
 
 
 def auto_create_alert(event: Event) -> Optional[Alert]:
@@ -192,3 +192,9 @@ def update_alert(alert_id: int, update: AlertUpdate, db: Session = Depends(get_d
     db.commit()
     db.refresh(alert)
     return alert
+
+
+@app.get("/risk/config")
+def risk_config():
+    return get_risk_config()
+

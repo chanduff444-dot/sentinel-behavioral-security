@@ -54,6 +54,9 @@ services:
     environment:
       DATABASE_URL: postgresql://sentinel:sentinel_pass@db:5432/sentinel
       REDIS_URL: redis://redis:6379/0
+      ALERT_MEDIUM_THRESHOLD: "3.0"
+      ALERT_HIGH_THRESHOLD: "5.0"
+      EVENT_TYPE_WEIGHTS: '{"login":1.0,"login_failure":3.0,"password_change":2.0,"mfa_enabled":-1.0,"mfa_disabled":2.5,"permission_change":3.0,"data_export":4.0,"admin_action":3.5}'
     ports:
       - "18000:8000"
     depends_on:
@@ -65,3 +68,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+
