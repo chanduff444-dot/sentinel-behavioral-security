@@ -30,3 +30,23 @@ class Event(Base):
     risk_score = Column(Float, nullable=True, index=True)
 
     user = relationship("User", back_populates="events")
+
+
+class Alert(Base):
+    __tablename__ = "alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    event_id = Column(Integer, ForeignKey("events.id"), nullable=True, index=True)
+    severity = Column(String, nullable=False)  # "low", "medium", "high"
+    reason = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="open")  # "open", "acknowledged", "resolved"
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("User", back_populates="alerts")
+    event = relationship("Event", back_populates="alerts")
+
+
+# Add reverse relationships
+User.alerts = relationship("Alert", back_populates="user")
+Event.alerts = relationship("Alert", back_populates="event")

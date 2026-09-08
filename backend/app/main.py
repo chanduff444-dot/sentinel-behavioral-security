@@ -7,8 +7,31 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .database import get_db
-from .models import Event, User
+from .models import Event, User, Alert
 from .risk import calculate_risk_score
+
+
+def auto_create_alert(event: Event) -> Optional[Alert]:
+    if event.risk_score is None:
+        return None
+
+    if event.risk_score >= 5.0:
+        severity = "high"
+        reason = f"High risk event: {event.event_type} (score={event.risk_score})"
+    elif event.risk_score >= 3.0:
+        severity = "medium"
+        reason = f"Medium risk event: {event.event_type} (score={event.risk_score})"
+    else:
+        return None
+
+    alert = Alert(
+        user_id=event.user_id,
+        event_id=event.id,
+        severity=severity,
+        reason=reason,
+        status="open",
+    )
+    return alert
 
 app = FastAPI(title="Behavioral Cyber Platform API")
 
@@ -43,6 +66,22 @@ class EventRead(BaseModel):
     risk_score: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AlertRead(BaseModel):
+    id: int
+    user_id: int
+    event_id: Optional[int] = None
+    severity: str
+    reason: Optional[str] = None
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AlertUpdate(BaseModel):
+    status: Optional[str] = None
 
 
 @app.get("/health")
@@ -99,6 +138,12 @@ def create_event(event: EventCreate, db: Session = Depends(get_db)):
         risk_score=risk_score,
     )
     db.add(db_event)
+    db.flush()  # get db_event.id
+
+    alert = auto_create_alert(db_event)
+    if alert:
+        db.add(alert)
+
     db.commit()
     db.refresh(db_event)
     return db_event
@@ -120,3 +165,30 @@ def list_events(
         query = query.filter(Event.event_type == event_type)
 
     return query.order_by(Event.timestamp.desc()).limit(limit).all()
+
+
+@app.get("/alerts", response_model=List[AlertRead])
+def list_alerts(
+    user_id: Optional[int] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    q = db.query(Alert)
+    if user_id is not None:
+        q = q.filter(Alert.user_id == user_id)
+    if status is not None:
+        q = q.filter(Alert.status == status)
+    return q.order_by(Alert.created_at.desc()).limit(limit).all()
+
+
+@app.patch("/alerts/{alert_id}", response_model=AlertRead)
+def update_alert(alert_id: int, update: AlertUpdate, db: Session = Depends(get_db)):
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if update.status is not None:
+        alert.status = update.status
+    db.commit()
+    db.refresh(alert)
+    return alert
