@@ -1,4 +1,3 @@
-
 services:
   db:
     image: postgres:17
@@ -44,6 +43,23 @@ services:
       - "5050:80"
     depends_on:
       db:
+        condition: service_healthy
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sentinel-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://sentinel:sentinel_pass@db:5432/sentinel
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "18000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:
