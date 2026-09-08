@@ -1,0 +1,55 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / React
+node_modules/
+dist/
+build/
+
+# Java / Maven / Gradle
+target/
+*.class
+.gradle/
+
+# Go
+bin/
+*.exe
+*.test
+
+# IDE settings
+.idea/
+.vscode/
+*.iml
+
+# Runtime data and persistent local volumes
+data/raw/
+data/processed/
+kafka-data/
+opensearch-data/
+postgres-data/
+clickhouse-data/
+neo4j-data/
+minio-data/
+nessie-data/
+redis-data/
+flink-checkpoints/
+flink-savepoints/
+mlruns/
+
+# Local logs
+*.log
+logs/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
