@@ -1,103 +1,122 @@
-from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Any, List, Optional
 
-import redis
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
-from app.db.session import SessionLocal, engine, init_db
-from app.models.event import Event
-from app.models.user import User
-from app.schemas.event import EventCreate, EventResponse
-from app.schemas.user import UserCreate, UserResponse
+from .database import get_db
+from .models import Event, User
+from .risk import calculate_risk_score
+
+app = FastAPI(title="Behavioral Cyber Platform API")
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    init_db()
-    yield
-    engine.dispose()
+class UserCreate(BaseModel):
+    email: str
+    full_name: str
 
 
-app = FastAPI(
-    title="Sentinel Behavioral Security API",
-    version="0.1.0",
-    lifespan=lifespan,
-)
+class UserRead(BaseModel):
+    id: int
+    email: str
+    full_name: str
+
+    model_config = ConfigDict(from_attributes=True)
 
 
-def get_db() -> Session:
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+class EventCreate(BaseModel):
+    user_id: int
+    event_type: str
+    session_id: Optional[str] = None
+    payload: Optional[dict[str, Any]] = None
+
+
+class EventRead(BaseModel):
+    id: int
+    user_id: int
+    event_type: str
+    session_id: Optional[str] = None
+    payload: Optional[Any] = None
+    timestamp: datetime
+    risk_score: Optional[float] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 @app.get("/health")
-def health_check() -> dict[str, str]:
+def health():
     return {"status": "ok"}
 
 
 @app.get("/health/dependencies")
-def dependency_health() -> dict[str, str]:
-    with engine.connect() as connection:
-        connection.execute(text("SELECT 1"))
+def health_deps(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+        return {"status": "ok", "database": "connected"}
+    except Exception as exc:
+        return {"status": "degraded", "database": "error", "detail": str(exc)}
 
-    redis_client = redis.from_url(settings.redis_url)
-    redis_client.ping()
-    return {"database": "ok", "redis": "ok"}
 
-
-@app.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def create_user(user_in: UserCreate, db: Session = Depends(get_db)) -> User:
-    existing = db.query(User).filter(User.email == user_in.email).first()
+@app.post("/users", response_model=UserRead)
+def create_user(user: UserCreate, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == user.email).first()
     if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered",
-        )
+        raise HTTPException(status_code=409, detail="Email already exists")
 
-    user = User(email=user_in.email, full_name=user_in.full_name)
-    db.add(user)
+    db_user = User(email=user.email, full_name=user.full_name)
+    db.add(db_user)
     db.commit()
-    db.refresh(user)
-    return user
+    db.refresh(db_user)
+    return db_user
 
 
-@app.get("/users", response_model=list[UserResponse])
-def list_users(db: Session = Depends(get_db)) -> list[User]:
-    return db.query(User).order_by(User.id).all()
+@app.get("/users", response_model=List[UserRead])
+def list_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    return db.query(User).offset(skip).limit(limit).all()
 
 
-@app.post("/events", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
-def create_event(event_in: EventCreate, db: Session = Depends(get_db)) -> Event:
-    if not db.get(User, event_in.user_id):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
+@app.post("/events", response_model=EventRead)
+def create_event(event: EventCreate, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == event.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    event = Event(
-        user_id=event_in.user_id,
-        event_type=event_in.event_type,
-        session_id=event_in.session_id,
-        payload=event_in.payload,
-        timestamp=datetime.utcnow(),
+    now = datetime.utcnow()
+    risk_score = calculate_risk_score(
+        event_type=event.event_type,
+        payload=event.payload,
+        timestamp=now,
     )
-    db.add(event)
+
+    db_event = Event(
+        user_id=event.user_id,
+        event_type=event.event_type,
+        session_id=event.session_id,
+        payload=event.payload,
+        timestamp=now,
+        risk_score=risk_score,
+    )
+    db.add(db_event)
     db.commit()
-    db.refresh(event)
-    return event
+    db.refresh(db_event)
+    return db_event
 
 
-@app.get("/events", response_model=list[EventResponse])
-def list_events(limit: int = 50, db: Session = Depends(get_db)) -> list[Event]:
-    return (
-        db.query(Event)
-        .order_by(Event.timestamp.desc())
-        .limit(min(max(limit, 1), 100))
-        .all()
-    )
+@app.get("/events", response_model=List[EventRead])
+def list_events(
+    user_id: Optional[int] = None,
+    event_type: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    query = db.query(Event)
+
+    if user_id is not None:
+        query = query.filter(Event.user_id == user_id)
+
+    if event_type is not None:
+        query = query.filter(Event.event_type == event_type)
+
+    return query.order_by(Event.timestamp.desc()).limit(limit).all()
