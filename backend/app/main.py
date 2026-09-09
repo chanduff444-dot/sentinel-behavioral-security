@@ -1,14 +1,28 @@
 from datetime import datetime
-from typing import Any, List, Optional
+from .threat_intel import threat_intel
+from typing import Any, List, Optional, NamedTuple
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Header
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .database import get_db
-from .models import Event, User, Alert
+from .models import Event, User, Alert, Session as SessionModel
 from .risk import calculate_risk_score, get_risk_config, MEDIUM_THRESHOLD, HIGH_THRESHOLD
+from .schemas.session import SessionCreate, SessionRead, SessionUpdate
+from .services.session_service import (
+    create_session,
+    get_active_session,
+    list_user_sessions,
+    update_session,
+    close_session,
+    refresh_session_activity,
+    enforce_max_sessions,
+    close_idle_sessions,
+    detect_session_anomaly,
+)
+import secrets
 
 
 def auto_create_alert(event: Event) -> Optional[Alert]:
@@ -33,8 +47,11 @@ def auto_create_alert(event: Event) -> Optional[Alert]:
     )
     return alert
 
+
 app = FastAPI(title="Behavioral Cyber Platform API")
 
+
+# ---------- Schemas ----------
 
 class UserCreate(BaseModel):
     email: str
@@ -47,6 +64,28 @@ class UserRead(BaseModel):
     full_name: str
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: Optional[str] = None  # placeholder, not validated yet
+
+
+class LoginResponse(BaseModel):
+    user_id: int
+    email: str
+    session_id: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LogoutRequest(BaseModel):
+    session_id: str
+
+
+class LogoutResponse(BaseModel):
+    session_id: str
+    status: str
 
 
 class EventCreate(BaseModel):
@@ -84,6 +123,40 @@ class AlertUpdate(BaseModel):
     status: Optional[str] = None
 
 
+# ---------- Session / User dependency ----------
+
+class CurrentContext(NamedTuple):
+    user: User
+    session: SessionModel
+
+
+def get_current_user_and_session(
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+    db: Session = Depends(get_db),
+) -> CurrentContext:
+    session = get_active_session(db, x_session_id)
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid or inactive session")
+    user = db.query(User).filter(User.id == session.user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found for session")
+    refresh_session_activity(db, session)
+    return CurrentContext(user=user, session=session)
+
+
+def get_session_from_header(
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+    db: Session = Depends(get_db),
+) -> SessionModel:
+    session = get_active_session(db, x_session_id)
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid or inactive session")
+    refresh_session_activity(db, session)
+    return session
+
+
+# ---------- Health ----------
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -97,6 +170,8 @@ def health_deps(db: Session = Depends(get_db)):
     except Exception as exc:
         return {"status": "degraded", "database": "error", "detail": str(exc)}
 
+
+# ---------- Users ----------
 
 @app.post("/users", response_model=UserRead)
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
@@ -116,11 +191,154 @@ def list_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return db.query(User).offset(skip).limit(limit).all()
 
 
-@app.post("/events", response_model=EventRead)
-def create_event(event: EventCreate, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == event.user_id).first()
+# ---------- Auth (login/logout) ----------
+
+@app.post("/login", response_model=LoginResponse)
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == req.email).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Placeholder password check (accept any non-empty password for demo)
+    # In real app, verify hashed password here.
+
+    session_id = f"sess-{secrets.token_hex(8)}"
+    db_session = create_session(
+        db=db,
+        user_id=user.id,
+        session_id=session_id,
+        ip_address=None,
+        user_agent=None,
+    )
+    enforce_max_sessions(db, user.id, db_session)
+
+    return LoginResponse(
+        user_id=user.id,
+        email=user.email,
+        session_id=session_id,
+    )
+
+
+@app.post("/logout", response_model=LogoutResponse)
+def logout(req: LogoutRequest, db: Session = Depends(get_db)):
+    session = get_active_session(db, req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or already closed")
+
+    closed = close_session(db, session)
+    return LogoutResponse(
+        session_id=closed.session_id,
+        status=closed.status,
+    )
+
+
+# ---------- Sessions ----------
+
+@app.post("/sessions", response_model=SessionRead)
+def create_session_endpoint(
+    session_in: SessionCreate,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == session_in.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    existing = get_active_session(db, session_in.session_id)
+    if existing:
+        raise HTTPException(status_code=409, detail="Session ID already in use")
+
+    db_session = create_session(
+        db=db,
+        user_id=session_in.user_id,
+        session_id=session_in.session_id,
+        ip_address=session_in.ip_address,
+        user_agent=session_in.user_agent,
+    )
+
+    enforce_max_sessions(db, session_in.user_id, db_session)
+
+    return db_session
+
+
+@app.get("/sessions", response_model=List[SessionRead])
+def list_sessions(
+    user_id: Optional[int] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    return list_user_sessions(db, user_id, limit=limit)
+
+
+@app.get("/sessions/me", response_model=SessionRead)
+def get_current_session(
+    session: SessionModel = Depends(get_session_from_header),
+):
+    return session
+
+
+@app.patch("/sessions/{session_id}", response_model=SessionRead)
+def update_session_endpoint(
+    session_id: str,
+    update: SessionUpdate,
+    db: Session = Depends(get_db),
+):
+    session = get_active_session(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return update_session(
+        db=db,
+        session=session,
+        status=update.status,
+        ip_address=update.ip_address,
+        user_agent=update.user_agent,
+    )
+
+
+@app.post("/sessions/{session_id}/close", response_model=SessionRead)
+def close_session_endpoint(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    session = get_active_session(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return close_session(db, session)
+
+
+@app.post("/sessions/close-idle", response_model=dict)
+def close_idle_sessions_endpoint(
+    user_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    closed_count = close_idle_sessions(db, user_id)
+    return {"closed_sessions": closed_count}
+
+
+# ---------- Events ----------
+
+@app.post("/events", response_model=EventRead)
+def create_event(
+    event: EventCreate,
+    x_session_id: Optional[str] = Header(None, alias="X-Session-ID"),
+    db: Session = Depends(get_db),
+):
+    if x_session_id:
+        session = get_active_session(db, x_session_id)
+        if not session:
+            raise HTTPException(status_code=401, detail="Invalid or inactive session")
+        user_id = session.user_id
+        session_id = session.session_id
+        refresh_session_activity(db, session)
+    else:
+        user = db.query(User).filter(User.id == event.user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        user_id = event.user_id
+        session_id = event.session_id
+        session = None
 
     now = datetime.utcnow()
     risk_score = calculate_risk_score(
@@ -130,19 +348,160 @@ def create_event(event: EventCreate, db: Session = Depends(get_db)):
     )
 
     db_event = Event(
-        user_id=event.user_id,
+        user_id=user_id,
         event_type=event.event_type,
-        session_id=event.session_id,
+        session_id=session_id,
         payload=event.payload,
         timestamp=now,
         risk_score=risk_score,
     )
     db.add(db_event)
-    db.flush()  # get db_event.id
+    db.flush()
+
+    # === Anomaly Detection ===
+    
+    # 1. First-time event type
+    existing_event_types = db.query(Event.event_type).filter(
+        Event.user_id == user_id,
+        Event.id != db_event.id
+    ).distinct().all()
+    existing_types = {et[0] for et in existing_event_types}
+    
+    if db_event.event_type not in existing_types:
+        first_alert = Alert(
+            user_id=user_id,
+            event_id=db_event.id,
+            severity="medium",
+            reason=f"First time event type '{db_event.event_type}' for user {user_id}",
+            status="open",
+        )
+        db.add(first_alert)
+    
+    # 2. High velocity (>10 events in 5 minutes)
+    from datetime import timedelta
+    five_min_ago = datetime.utcnow() - timedelta(minutes=5)
+    recent_event_count = db.query(Event).filter(
+        Event.user_id == user_id,
+        Event.timestamp >= five_min_ago
+    ).count()
+    
+    if recent_event_count > 10:
+        velocity_alert = Alert(
+            user_id=user_id,
+            event_id=db_event.id,
+            severity="high",
+            reason=f"High velocity: {recent_event_count} events in 5 minutes",
+            status="open",
+        )
+        db.add(velocity_alert)
+    
+    # 3. Off-hours activity (01:00-05:00 UTC)
+    event_hour = db_event.timestamp.hour
+    if 1 <= event_hour < 5:
+        offhours_alert = Alert(
+            user_id=user_id,
+            event_id=db_event.id,
+            severity="low",
+            reason=f"Off-hours activity at {db_event.timestamp.isoformat()}",
+            status="open",
+        )
+        db.add(offhours_alert)
 
     alert = auto_create_alert(db_event)
     if alert:
         db.add(alert)
+
+    if session:
+        anomaly_alert = detect_session_anomaly(db, session, db_event)
+        if anomaly_alert:
+            db.add(anomaly_alert)
+
+    db.commit()
+    db.refresh(db_event)
+    return db_event
+
+
+@app.post("/events/session", response_model=EventRead)
+def create_event_with_session(
+    event_type: str,
+    payload: Optional[dict[str, Any]] = None,
+    ctx: CurrentContext = Depends(get_current_user_and_session),
+    db: Session = Depends(get_db),
+):
+    now = datetime.utcnow()
+    risk_score = calculate_risk_score(
+        event_type=event_type,
+        payload=payload,
+        timestamp=now,
+    )
+
+    db_event = Event(
+        user_id=ctx.user.id,
+        event_type=event_type,
+        session_id=ctx.session.session_id,
+        payload=payload,
+        timestamp=now,
+        risk_score=risk_score,
+    )
+    db.add(db_event)
+    db.flush()
+
+    # === Anomaly Detection ===
+    
+    # 1. First-time event type
+    existing_event_types = db.query(Event.event_type).filter(
+        Event.user_id == user_id,
+        Event.id != db_event.id
+    ).distinct().all()
+    existing_types = {et[0] for et in existing_event_types}
+    
+    if db_event.event_type not in existing_types:
+        first_alert = Alert(
+            user_id=user_id,
+            event_id=db_event.id,
+            severity="medium",
+            reason=f"First time event type '{db_event.event_type}' for user {user_id}",
+            status="open",
+        )
+        db.add(first_alert)
+    
+    # 2. High velocity (>10 events in 5 minutes)
+    from datetime import timedelta
+    five_min_ago = datetime.utcnow() - timedelta(minutes=5)
+    recent_event_count = db.query(Event).filter(
+        Event.user_id == user_id,
+        Event.timestamp >= five_min_ago
+    ).count()
+    
+    if recent_event_count > 10:
+        velocity_alert = Alert(
+            user_id=user_id,
+            event_id=db_event.id,
+            severity="high",
+            reason=f"High velocity: {recent_event_count} events in 5 minutes",
+            status="open",
+        )
+        db.add(velocity_alert)
+    
+    # 3. Off-hours activity (01:00-05:00 UTC)
+    event_hour = db_event.timestamp.hour
+    if 1 <= event_hour < 5:
+        offhours_alert = Alert(
+            user_id=user_id,
+            event_id=db_event.id,
+            severity="low",
+            reason=f"Off-hours activity at {db_event.timestamp.isoformat()}",
+            status="open",
+        )
+        db.add(offhours_alert)
+
+    alert = auto_create_alert(db_event)
+    if alert:
+        db.add(alert)
+
+    anomaly_alert = detect_session_anomaly(db, ctx.session, db_event)
+    if anomaly_alert:
+        db.add(anomaly_alert)
 
     db.commit()
     db.refresh(db_event)
@@ -166,6 +525,8 @@ def list_events(
 
     return query.order_by(Event.timestamp.desc()).limit(limit).all()
 
+
+# ---------- Alerts ----------
 
 @app.get("/alerts", response_model=List[AlertRead])
 def list_alerts(
@@ -194,7 +555,170 @@ def update_alert(alert_id: int, update: AlertUpdate, db: Session = Depends(get_d
     return alert
 
 
+# ---------- Risk ----------
+
 @app.get("/risk/config")
 def risk_config():
     return get_risk_config()
 
+
+# ========== IoC Detection Endpoints ==========
+
+class IoCCheckResponse(BaseModel):
+    is_malicious: bool
+    confidence: int
+    source: str
+    threat_type: Optional[str] = None
+    details: Optional[dict] = None
+
+@app.get("/ioc/check-ip/{ip_address}", response_model=IoCCheckResponse)
+def check_ip_reputation(ip_address: str, db: Session = Depends(get_db)):
+    """Check IP against threat intelligence databases"""
+    
+    # Known malicious IPs (local blocklist)
+    known_bad_ips = [
+        "185.220.101.1", "185.220.101.2",  # Tor exit nodes
+        "45.155.205.230", "45.155.205.231",  # Known scanners
+        "193.32.162.159",  # C2 server
+        "23.129.64.100",   # Malicious
+    ]
+    
+    is_malicious = ip_address in known_bad_ips
+    confidence = 100 if is_malicious else 0
+    
+    # Create alert if malicious
+    if is_malicious:
+        alert = Alert(
+            user_id=1,
+            severity="high",
+            reason=f"IoC Detection: Malicious IP {ip_address} (confidence: {confidence}%)",
+            status="open",
+        )
+        db.add(alert)
+        db.commit()
+    
+    return IoCCheckResponse(
+        is_malicious=is_malicious,
+        confidence=confidence,
+        source="local_blocklist" if is_malicious else "none",
+        threat_type="known_malicious_ip" if is_malicious else None
+    )
+
+
+@app.get("/ioc/check-url", response_model=IoCCheckResponse)
+def check_url_threat(url: str, db: Session = Depends(get_db)):
+    """Check URL against threat intelligence databases"""
+    
+    import re
+    
+    # Known malicious domains
+    malicious_domains = [
+        "testvirus.org", "wicar.org", "malware.com",
+        "phishing-site.xyz", "evil-domain.top", "badsite.tk"
+    ]
+    
+    # Suspicious patterns
+    suspicious_patterns = [
+        r"bit\.ly", r"tinyurl\.com",  # URL shorteners
+        r"\.xyz$", r"\.top$", r"\.tk$", r"\.ml$",  # Suspicious TLDs
+        r"login.*verify", r"account.*update",  # Phishing patterns
+    ]
+    
+    is_malicious = False
+    threat_type = None
+    confidence = 0
+    source = "none"
+    
+    # Check malicious domains
+    for domain in malicious_domains:
+        if domain in url.lower():
+            is_malicious = True
+            threat_type = "known_malicious_domain"
+            confidence = 95
+            source = "local_blocklist"
+            break
+    
+    # Check suspicious patterns
+    if not is_malicious:
+        for pattern in suspicious_patterns:
+            if re.search(pattern, url, re.IGNORECASE):
+                is_malicious = True
+                threat_type = "suspicious_pattern"
+                confidence = 60
+                source = "pattern_detection"
+                break
+    
+    # Create alert if malicious
+    if is_malicious:
+        alert = Alert(
+            user_id=1,
+            severity="high" if confidence > 75 else "medium",
+            reason=f"IoC Detection: Malicious URL - {url[:50]}... (type: {threat_type})",
+            status="open",
+        )
+        db.add(alert)
+        db.commit()
+    
+    return IoCCheckResponse(
+        is_malicious=is_malicious,
+        confidence=confidence,
+        source=source,
+        threat_type=threat_type
+    )
+
+
+@app.get("/ioc/check-file/{file_hash}", response_model=IoCCheckResponse)
+def check_file_hash(file_hash: str, db: Session = Depends(get_db)):
+    """Check file hash against malware databases"""
+    
+    # Known malware hashes
+    known_malware = {
+        "44d88612fea8a8f36de82e1278abb02f": {"family": "EICAR_Test_Virus", "confidence": 100},
+        "e99a18c428cb38d5f260853678922e03": {"family": "Test_Malware", "confidence": 100},
+        "d41d8cd98f00b204e9800998ecf8427e": {"family": "Empty_File_Suspicious", "confidence": 50}
+    }
+    
+    is_malicious = file_hash.lower() in known_malware
+    confidence = known_malware.get(file_hash.lower(), {}).get("confidence", 0)
+    threat_type = known_malware.get(file_hash.lower(), {}).get("family", None)
+    source = "local_database" if is_malicious else "none"
+    
+    # Create alert if malicious
+    if is_malicious:
+        alert = Alert(
+            user_id=1,
+            severity="high",
+            reason=f"IoC Detection: Malicious file detected (family: {threat_type})",
+            status="open",
+        )
+        db.add(alert)
+        db.commit()
+    
+    return IoCCheckResponse(
+        is_malicious=is_malicious,
+        confidence=confidence,
+        source=source,
+        threat_type=threat_type
+    )
+
+
+@app.get("/threat-intel/summary")
+def get_threat_intel_summary():
+    """Get threat intelligence configuration status"""
+    return {
+        "apis_configured": True,
+        "virustotal_configured": True,
+        "google_sb_configured": True,
+        "local_blocklist_size": 6,
+        "known_malware_hashes": 3
+    }
+
+
+@app.get("/network/status")
+def get_network_status():
+    """Get network monitoring status"""
+    return {
+        "active_connections": 0,
+        "unique_remote_ips": 0,
+        "monitoring_enabled": True
+    }

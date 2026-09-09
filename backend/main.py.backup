@@ -1,0 +1,64 @@
+
+# Check IP reputation
+@app.get("/api/ioc/check-ip/{ip_address}")
+def check_ip(ip_address: str, db: Session = Depends(get_db)):
+    from threat_intel import threat_intel
+    result = threat_intel.check_ip_reputation(ip_address)
+    
+    # Create alert if malicious
+    if result.get("is_malicious"):
+        alert = Alert(
+            user_id=1,  # You can pass user_id from client
+            severity="high" if result.get("confidence", 0) > 75 else "medium",
+            reason=f"IoC Detection: Malicious IP {ip_address} (confidence: {result.get('confidence', 0)}%)"
+        )
+        db.add(alert)
+        db.commit()
+    
+    return result
+
+# Check URL threat
+@app.get("/api/ioc/check-url")
+def check_url(url: str, db: Session = Depends(get_db)):
+    from threat_intel import threat_intel
+    result = threat_intel.check_url_threat(url)
+    
+    if result.get("is_malicious"):
+        alert = Alert(
+            user_id=1,
+            severity="high" if result.get("confidence", 0) > 75 else "medium",
+            reason=f"IoC Detection: Malicious URL detected (type: {result.get('threat_type')})"
+        )
+        db.add(alert)
+        db.commit()
+    
+    return result
+
+# Check file hash
+@app.get("/api/ioc/check-file/{file_hash}")
+def check_file(file_hash: str, db: Session = Depends(get_db)):
+    from threat_intel import threat_intel
+    result = threat_intel.check_file_hash(file_hash)
+    
+    if result.get("is_malicious"):
+        alert = Alert(
+            user_id=1,
+            severity="high",
+            reason=f"IoC Detection: Malicious file detected (family: {result.get('malware_family')})"
+        )
+        db.add(alert)
+        db.commit()
+    
+    return result
+
+# Get network status
+@app.get("/api/network/status")
+def get_network_status():
+    from network_monitor import network_monitor
+    return network_monitor.get_network_summary()
+
+# Get threat intel summary
+@app.get("/api/threat-intel/summary")
+def get_threat_summary():
+    from threat_intel import threat_intel
+    return threat_intel.get_threat_summary()

@@ -50,3 +50,21 @@ class Alert(Base):
 # Add reverse relationships
 User.alerts = relationship("Alert", back_populates="user")
 Event.alerts = relationship("Alert", back_populates="event")
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    session_id = Column(String, unique=True, nullable=False, index=True)
+    status = Column(String, nullable=False, default="active")  # "active", "closed"
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_activity_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ip_address = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
+
+    user = relationship("User", back_populates="sessions")
+
+
+User.sessions = relationship("Session", back_populates="user")

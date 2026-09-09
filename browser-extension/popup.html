@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      width: 350px;
+      padding: 15px;
+      font-family: Arial, sans-serif;
+    }
+    h2 {
+      color: #2c3e50;
+      margin-top: 0;
+    }
+    .status {
+      padding: 10px;
+      background: #27ae60;
+      color: white;
+      border-radius: 5px;
+      margin-bottom: 15px;
+    }
+    .threat-list {
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .threat-item {
+      padding: 10px;
+      background: #ffe6e6;
+      border-left: 4px solid #e74c3c;
+      margin-bottom: 8px;
+      border-radius: 3px;
+    }
+    .threat-url {
+      font-size: 12px;
+      color: #333;
+      word-break: break-all;
+    }
+    .threat-type {
+      font-size: 11px;
+      color: #e74c3c;
+      font-weight: bold;
+    }
+    .threat-time {
+      font-size: 10px;
+      color: #666;
+    }
+    .no-threats {
+      color: #27ae60;
+      text-align: center;
+      padding: 20px;
+    }
+    button {
+      width: 100%;
+      padding: 10px;
+      background: #3498db;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+    button:hover {
+      background: #2980b9;
+    }
+  </style>
+</head>
+<body>
+  <h2>🛡️ Threat Monitor</h2>
+  <div class="status">
+    ✅ Real-time monitoring active
+  </div>
+  
+  <h3>Detected Threats:</h3>
+  <div id="threatList" class="threat-list">
+    <div class="no-threats">No threats detected yet</div>
+  </div>
+  
+  <button id="clearBtn">Clear History</button>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
