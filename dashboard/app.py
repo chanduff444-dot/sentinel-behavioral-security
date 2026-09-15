@@ -21,7 +21,7 @@ import streamlit.components.v1 as components
 # CONFIG
 # ==========================================================================
 
-DEFAULT_API_URL = "http://localhost:18000"
+DEFAULT_API_URL = "https://sentinel-behavioral-security.onrender.com"
 REQUEST_TIMEOUT = 4
 CACHE_TTL = 3
 GEO_CACHE_TTL = 3600
