@@ -53,3 +53,5 @@ logs/
 # OS artifacts
 .DS_Store
 Thumbs.db
+.streamlit/secrets.toml
+.env
