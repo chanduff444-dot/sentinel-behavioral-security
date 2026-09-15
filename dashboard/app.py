@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import socket
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 import pandas as pd
@@ -287,6 +287,7 @@ def fetch_events(api_url: str) -> pd.DataFrame:
     df = pd.DataFrame(data) if data else pd.DataFrame()
     if not df.empty and "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Kolkata")
         df = df.sort_values("timestamp", ascending=False)
     return df
 
@@ -297,6 +298,7 @@ def fetch_alerts(api_url: str) -> pd.DataFrame:
     df = pd.DataFrame(data) if data else pd.DataFrame()
     if not df.empty and "created_at" in df.columns:
         df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+        df["created_at"] = df["created_at"].dt.tz_localize("UTC").dt.tz_convert("Asia/Kolkata")
         df = df.sort_values("created_at", ascending=False)
     return df
 
@@ -803,3 +805,4 @@ with tab_settings:
 if auto_refresh:
     time.sleep(refresh_interval)
     st.rerun()
+
