@@ -6,6 +6,7 @@ SIH 2026 — Docker Backend Version
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 from datetime import datetime, timezone, timedelta
@@ -21,7 +22,14 @@ import streamlit.components.v1 as components
 # CONFIG
 # ==========================================================================
 
-DEFAULT_API_URL = "https://sentinel-behavioral-security.onrender.com"
+# Support Streamlit secrets (configured in Streamlit Cloud dashboard), env var, or fallback
+try:
+    if hasattr(st, "secrets") and "API_URL" in st.secrets:
+        DEFAULT_API_URL = str(st.secrets["API_URL"]).rstrip("/")
+    else:
+        DEFAULT_API_URL = os.getenv("API_URL", "http://localhost:18000").rstrip("/")
+except Exception:
+    DEFAULT_API_URL = os.getenv("API_URL", "http://localhost:18000").rstrip("/")
 REQUEST_TIMEOUT = 4
 CACHE_TTL = 3
 GEO_CACHE_TTL = 3600
@@ -52,7 +60,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-if "api_url" not in st.session_state:
+if "api_url" not in st.session_state or not st.session_state.api_url or "sentinel-behavioral-security.onrender.com" in st.session_state.api_url:
     st.session_state.api_url = DEFAULT_API_URL
 if "high_threshold" not in st.session_state:
     st.session_state.high_threshold = DEFAULT_HIGH_THRESHOLD
@@ -246,6 +254,115 @@ def matrix_rain_background(height: int = 90) -> None:
     components.html(html, height=height + 4)
 
 
+
+# ==========================================================================
+# SIMULATED SOC TELEMETRY (Cloud Demo Mode Fallback)
+# ==========================================================================
+
+def get_simulated_soc_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Generates realistic SOC events and threat intelligence alerts for Cloud Demo mode."""
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    
+    events = [
+        {
+            "id": 101, "user_id": 1, "event_type": "suspicious_connection",
+            "session_id": "sess-a1f9", "timestamp": now - timedelta(minutes=2), "risk_score": 8.5,
+            "payload": {"local_ip": "192.168.1.15", "remote_ip": "185.220.101.5", "remote_port": 4444, "process": "powershell.exe"}
+        },
+        {
+            "id": 102, "user_id": 1, "event_type": "file_download",
+            "session_id": "sess-a1f9", "timestamp": now - timedelta(minutes=6), "risk_score": 9.2,
+            "payload": {"local_ip": "192.168.1.15", "remote_ip": "45.155.205.233", "remote_port": 80, "process": "curl", "filename": "trojan_dropper.bin"}
+        },
+        {
+            "id": 103, "user_id": 2, "event_type": "login_failure",
+            "session_id": None, "timestamp": now - timedelta(minutes=11), "risk_score": 6.8,
+            "payload": {"local_ip": "10.0.0.42", "remote_ip": "193.32.162.159", "remote_port": 22, "process": "sshd", "attempts": 12}
+        },
+        {
+            "id": 104, "user_id": 1, "event_type": "privilege_escalation",
+            "session_id": "sess-a1f9", "timestamp": now - timedelta(minutes=18), "risk_score": 7.9,
+            "payload": {"local_ip": "192.168.1.15", "remote_ip": "127.0.0.1", "remote_port": 0, "process": "sudo", "cmd": "chmod +s /bin/bash"}
+        },
+        {
+            "id": 105, "user_id": 3, "event_type": "data_export",
+            "session_id": "sess-f8b2", "timestamp": now - timedelta(minutes=25), "risk_score": 7.2,
+            "payload": {"local_ip": "192.168.1.28", "remote_ip": "23.129.64.100", "remote_port": 443, "process": "python3", "bytes": 52428800}
+        },
+        {
+            "id": 106, "user_id": 1, "event_type": "suspicious_connection",
+            "session_id": "sess-a1f9", "timestamp": now - timedelta(minutes=35), "risk_score": 5.4,
+            "payload": {"local_ip": "192.168.1.15", "remote_ip": "103.245.236.1", "remote_port": 31337, "process": "nc.exe"}
+        },
+        {
+            "id": 107, "user_id": 2, "event_type": "login",
+            "session_id": "sess-c3d1", "timestamp": now - timedelta(minutes=50), "risk_score": 2.1,
+            "payload": {"local_ip": "192.168.1.50", "remote_ip": "192.168.1.50", "remote_port": 8501, "process": "browser"}
+        },
+        {
+            "id": 108, "user_id": 4, "event_type": "network_connection",
+            "session_id": "sess-e5e7", "timestamp": now - timedelta(minutes=65), "risk_score": 1.5,
+            "payload": {"local_ip": "192.168.1.12", "remote_ip": "8.8.8.8", "remote_port": 53, "process": "dns"}
+        },
+        {
+            "id": 109, "user_id": 1, "event_type": "suspicious_connection",
+            "session_id": "sess-a1f9", "timestamp": now - timedelta(minutes=80), "risk_score": 6.1,
+            "payload": {"local_ip": "192.168.1.15", "remote_ip": "185.220.101.2", "remote_port": 5555, "process": "svchost.exe"}
+        },
+        {
+            "id": 110, "user_id": 3, "event_type": "login_failure",
+            "session_id": None, "timestamp": now - timedelta(minutes=95), "risk_score": 4.5,
+            "payload": {"local_ip": "10.0.0.18", "remote_ip": "45.155.205.230", "remote_port": 443, "process": "nginx"}
+        }
+    ]
+
+    alerts = [
+        {
+            "id": 201, "user_id": 1, "event_id": 101, "severity": "critical",
+            "reason": "C2 Traffic: Outbound connection to malicious IP 185.220.101.5 on port 4444 by powershell.exe",
+            "status": "open", "created_at": now - timedelta(minutes=2)
+        },
+        {
+            "id": 202, "user_id": 1, "event_id": 102, "severity": "critical",
+            "reason": "IoC Detection: Malware signature detected in downloaded file 'trojan_dropper.bin'",
+            "status": "investigating", "created_at": now - timedelta(minutes=6)
+        },
+        {
+            "id": 203, "user_id": 2, "event_id": 103, "severity": "high",
+            "reason": "Brute-force attack detected: 12 failed authentication attempts in 60s from 193.32.162.159",
+            "status": "open", "created_at": now - timedelta(minutes=11)
+        },
+        {
+            "id": 204, "user_id": 1, "event_id": 104, "severity": "high",
+            "reason": "Privilege Escalation: Unauthorized SUID bit set on /bin/bash",
+            "status": "investigating", "created_at": now - timedelta(minutes=18)
+        },
+        {
+            "id": 205, "user_id": 3, "event_id": 105, "severity": "high",
+            "reason": "Data Exfiltration: High-volume outbound transfer (50 MB) to untrusted IP 23.129.64.100",
+            "status": "open", "created_at": now - timedelta(minutes=25)
+        },
+        {
+            "id": 206, "user_id": 1, "event_id": 106, "severity": "medium",
+            "reason": "Suspicious Port Activity: Process nc.exe listening/connecting on backdoor port 31337",
+            "status": "resolved", "created_at": now - timedelta(minutes=35)
+        },
+        {
+            "id": 207, "user_id": 1, "event_id": 109, "severity": "medium",
+            "reason": "Tor Exit Node Connection: Communication with known Tor exit IP 185.220.101.2",
+            "status": "resolved", "created_at": now - timedelta(minutes=80)
+        },
+        {
+            "id": 208, "user_id": 2, "event_id": 107, "severity": "low",
+            "reason": "First-time session established for user 2 from new internal workstation 192.168.1.50",
+            "status": "resolved", "created_at": now - timedelta(minutes=50)
+        }
+    ]
+
+    events_df = pd.DataFrame(events)
+    alerts_df = pd.DataFrame(alerts)
+    return events_df, alerts_df
+
 # ==========================================================================
 # API CLIENT
 # ==========================================================================
@@ -271,10 +388,22 @@ def _get(endpoint: str, params: Optional[dict] = None) -> Any:
 
 
 def update_alert_status(alert_id: Any, status: str) -> bool:
+    if st.session_state.get("is_demo_mode", False):
+        if "demo_alert_statuses" not in st.session_state:
+            st.session_state.demo_alert_statuses = {}
+        st.session_state.demo_alert_statuses[alert_id] = status
+        st.toast(f"✅ Alert #{alert_id} marked as '{status}' (Demo Mode)", icon="✅")
+        st.rerun()
+        return True
+
     url = f"{st.session_state.api_url}/alerts/{alert_id}"
     try:
-        r = requests.put(url, json={"status": status}, timeout=REQUEST_TIMEOUT)
+        r = requests.patch(url, json={"status": status}, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 405:
+            r = requests.put(url, json={"status": status}, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
+        st.toast(f"✅ Alert #{alert_id} marked as '{status}'", icon="✅")
+        st.rerun()
         return True
     except requests.exceptions.RequestException as exc:
         st.toast(f"⚠️ Failed to update alert {alert_id}: {exc}", icon="⚠️")
@@ -303,10 +432,14 @@ def fetch_alerts(api_url: str) -> pd.DataFrame:
     return df
 
 
-def check_backend_health() -> bool:
+def check_backend_health(url: Optional[str] = None) -> bool:
+    target = (url or st.session_state.api_url).rstrip("/")
     try:
-        requests.get(f"{st.session_state.api_url}/events", timeout=2)
-        return True
+        r = requests.get(f"{target}/health", timeout=2)
+        if r.status_code == 200:
+            return True
+        r_ev = requests.get(f"{target}/events", timeout=2)
+        return r_ev.status_code == 200
     except requests.exceptions.RequestException:
         return False
 
@@ -358,8 +491,12 @@ def extract_payload_info(payload_str: str) -> dict:
     try:
         payload = json.loads(payload_str) if isinstance(payload_str, str) else payload_str
         if isinstance(payload, dict):
+            # Prefer remote IP for threat analysis if available, otherwise local
+            remote = payload.get("remote_ip")
+            local = payload.get("local_ip")
+            source = remote if remote and remote not in ["0.0.0.0", "unknown"] else (local or "?")
             return {
-                "source_ip": payload.get("local_ip", payload.get("remote_ip", "?")),
+                "source_ip": source,
                 "destination": f"{payload.get('remote_ip', '?')}:{payload.get('remote_port', '?')}",
                 "process": payload.get("process", "unknown"),
             }
@@ -372,13 +509,55 @@ def extract_payload_info(payload_str: str) -> dict:
 # SIDEBAR
 # ==========================================================================
 
+# ==========================================================================
+# DATA FETCH & HEALTH CHECK
+# ==========================================================================
+
+backend_ok = check_backend_health(st.session_state.api_url)
+
+if backend_ok:
+    try:
+        events_df = fetch_events(st.session_state.api_url)
+        alerts_df = fetch_alerts(st.session_state.api_url)
+        is_demo_mode = False
+    except Exception:
+        events_df, alerts_df = get_simulated_soc_data()
+        is_demo_mode = True
+else:
+    events_df, alerts_df = get_simulated_soc_data()
+    is_demo_mode = True
+
+st.session_state["is_demo_mode"] = is_demo_mode
+
+# Apply interactive alert updates in demo mode
+if is_demo_mode and "demo_alert_statuses" in st.session_state:
+    for aid, st_val in st.session_state.demo_alert_statuses.items():
+        alerts_df.loc[alerts_df["id"] == aid, "status"] = st_val
+
+# ==========================================================================
+# SIDEBAR
+# ==========================================================================
+
 with st.sidebar:
     st.markdown("## 🛰️ SOC Control")
-    backend_ok = check_backend_health()
-    dot = "status-online" if backend_ok else "status-offline"
-    txt = "LIVE — backend connected" if backend_ok else "OFFLINE — backend unreachable"
+    dot = "status-online" if not is_demo_mode else "status-offline"
+    txt = "LIVE — backend connected" if not is_demo_mode else "DEMO MODE — simulated telemetry"
     st.markdown(f'<span class="status-dot {dot}"></span>{txt}', unsafe_allow_html=True)
-    st.caption(f"`{st.session_state.api_url}`")
+    
+    curr_url = st.session_state.api_url
+    api_url_in = st.text_input("Backend API URL", value=curr_url, key="soc_sidebar_url", help="Enter live backend URL or switch back to local")
+    if api_url_in.strip() and api_url_in.strip() != curr_url:
+        st.session_state.api_url = api_url_in.strip()
+        st.cache_data.clear()
+        st.rerun()
+
+    if is_demo_mode:
+        st.caption("ℹ️ Running with simulated SOC telemetry because backend API is unreachable.")
+        if st.session_state.api_url != "http://localhost:18000":
+            if st.button("🔌 Try Localhost (18000)", use_container_width=True):
+                st.session_state.api_url = "http://localhost:18000"
+                st.cache_data.clear()
+                st.rerun()
 
     st.divider()
     auto_refresh = st.toggle("Live auto-refresh", value=True)
@@ -406,24 +585,18 @@ st.markdown(
     '<div class="soc-subtitle">Behavioral anomaly detection · network telemetry · threat intelligence — SIH 2026</div>',
     unsafe_allow_html=True,
 )
-st.write("")
+
+if is_demo_mode:
+    st.markdown(
+        '''
+        <div style="background: rgba(46, 230, 214, 0.08); border-left: 4px solid #2ee6d6; padding: 8px 14px; border-radius: 4px; margin: 10px 0; font-size: 0.85rem; color: #e7f2f1;">
+            ⚡ <strong>Cloud Demo Mode Active:</strong> Displaying simulated SOC telemetry & threat intelligence. (To connect a live backend, specify its public URL in the sidebar).
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
+
 matrix_rain_background(height=70)
-
-# ==========================================================================
-# DATA FETCH
-# ==========================================================================
-
-try:
-    events_df = fetch_events(st.session_state.api_url)
-    alerts_df = fetch_alerts(st.session_state.api_url)
-    fetch_error = None
-except ApiError as exc:
-    events_df, alerts_df = pd.DataFrame(), pd.DataFrame()
-    fetch_error = str(exc)
-
-if fetch_error:
-    st.error(f"⚠️ {fetch_error}")
-    st.stop()
 
 # Process alerts
 if not alerts_df.empty:

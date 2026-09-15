@@ -1,122 +1,143 @@
 #!/usr/bin/env python3
-import psutil
+"""
+Smart Network Monitor - SIH 2026
+Only reports SUSPICIOUS connections, not every connection
+"""
+
 import socket
+import psutil
 import requests
 import time
 from datetime import datetime
 
 API_BASE = "http://localhost:18000"
 
-# Known malicious IPs
-MALICIOUS_IPS = [
-    "185.220.101.1", "185.220.101.2",
-    "45.155.205.230", "45.155.205.231",
-    "193.32.162.159", "23.129.64.100",
-]
+# Known safe ports (don't report these)
+SAFE_PORTS = {
+    80, 443,  # HTTP/HTTPS (normal web)
+    53,       # DNS
+    123,      # NTP
+    443,      # HTTPS
+    993, 995, # Email
+    587, 465, # SMTP
+    22,       # SSH (if you use it)
+    8501,     # Streamlit
+    18000,    # Backend
+}
 
-# Suspicious ports
-SUSPICIOUS_PORTS = [4444, 5555, 6666, 31337, 12345, 1337]
+# Suspicious ports (always report)
+SUSPICIOUS_PORTS = {
+    4444, 5555, 6666,  # Common malware ports
+    31337,             # Backdoor
+    12345, 54321,      # Common trojans
+}
 
-def get_active_connections():
+# Known bad IPs (example threat intel)
+BAD_IPS = {
+    'testvirus.org',
+    'malware.com',
+    'evil.com',
+}
+
+def get_connections():
     connections = []
-    try:
-        for conn in psutil.net_connections(kind='inet'):
-            if conn.status == 'ESTABLISHED' and conn.raddr:
-                connections.append({
-                    "local_ip": conn.laddr.ip if conn.laddr else "0.0.0.0",
-                    "local_port": conn.laddr.port if conn.laddr else 0,
-                    "remote_ip": conn.raddr.ip,
-                    "remote_port": conn.raddr.port,
-                    "protocol": "tcp" if conn.type == socket.SOCK_STREAM else "udp",
-                    "process": get_process_name(conn.pid),
-                    "timestamp": datetime.now().isoformat()
-                })
-    except (psutil.AccessDenied, Exception) as e:
-        pass
+    for conn in psutil.net_connections(kind='inet'):
+        if conn.status == 'ESTABLISHED':
+            connections.append({
+                'local_ip': conn.laddr.ip if conn.laddr else 'unknown',
+                'local_port': conn.laddr.port if conn.laddr else 0,
+                'remote_ip': conn.raddr.ip if conn.raddr else 'unknown',
+                'remote_port': conn.raddr.port if conn.raddr else 0,
+                'process': conn.pid,
+            })
     return connections
 
-def get_process_name(pid):
-    try:
-        if pid:
-            return psutil.Process(pid).name()
-    except:
-        pass
-    return "unknown"
-
-def check_ip_reputation(ip):
-    try:
-        response = requests.get(f"{API_BASE}/ioc/check-ip/{ip}", timeout=5)
-        return response.json()
-    except:
-        return {"is_malicious": False, "confidence": 0}
-
-def send_alert(reason, severity="high"):
-    try:
-        requests.post(f"{API_BASE}/alerts", json={
-            "user_id": 1,
-            "severity": severity,
-            "reason": reason,
-            "status": "open"
-        }, timeout=5)
-    except:
-        pass
-
-def log_connection(conn):
-    try:
-        requests.post(f"{API_BASE}/events", json={
-            "user_id": 1,
-            "event_type": "network_connection",
-            "payload": conn
-        }, timeout=5)
-    except:
-        pass
-
-def monitor():
-    print("🔍 Network Monitor Started...")
-    print(f"Monitoring connections every 5 seconds...")
-    print(f"API Base: {API_BASE}")
+def is_suspicious(conn):
+    """Check if connection is suspicious"""
     
-    seen_connections = set()
+    # Skip localhost
+    if conn['local_ip'] in ['127.0.0.1', '::1', 'localhost']:
+        return False
+    if conn['remote_ip'] in ['127.0.0.1', '::1', 'localhost']:
+        return False
+    
+    # Skip private IPs
+    if conn['remote_ip'].startswith('192.168.') or conn['remote_ip'].startswith('10.'):
+        return False
+    
+    # Always report suspicious ports
+    if conn['remote_port'] in SUSPICIOUS_PORTS:
+        return True
+    
+    # Don't report safe ports
+    if conn['remote_port'] in SAFE_PORTS:
+        return False
+    
+    # Report everything else as potentially interesting
+    return True
+
+def send_event(event_type, payload, risk_score=1.0):
+    try:
+        response = requests.post(f"{API_BASE}/events", json={
+            "user_id": 1,
+            "event_type": event_type,
+            "payload": payload,
+            "risk_score": risk_score,
+        }, timeout=3)
+        return response.status_code == 200
+    except:
+        return False
+
+def main():
+    print("🔍 Smart Network Monitor Started...")
+    print("Monitoring suspicious connections every 10 seconds...")
+    print(f"API Base: {API_BASE}")
+    print("")
+    
+    reported = set()  # Track reported connections
     
     while True:
         try:
-            connections = get_active_connections()
+            connections = get_connections()
             
             for conn in connections:
-                conn_key = f"{conn['remote_ip']}:{conn['remote_port']}"
+                # Create unique key
+                conn_key = f"{conn['local_ip']}:{conn['local_port']}->{conn['remote_ip']}:{conn['remote_port']}"
                 
-                if conn_key not in seen_connections:
-                    seen_connections.add(conn_key)
-                    print(f"📡 New connection: {conn['remote_ip']}:{conn['remote_port']} ({conn['process']})")
+                # Skip if already reported
+                if conn_key in reported:
+                    continue
+                
+                # Check if suspicious
+                if is_suspicious(conn):
+                    payload = {
+                        "local_ip": conn['local_ip'],
+                        "local_port": conn['local_port'],
+                        "remote_ip": conn['remote_ip'],
+                        "remote_port": conn['remote_port'],
+                        "process": str(conn['process']),
+                        "timestamp": datetime.now().isoformat(),
+                    }
                     
-                    log_connection(conn)
+                    # Higher risk for suspicious ports
+                    risk = 5.0 if conn['remote_port'] in SUSPICIOUS_PORTS else 2.0
                     
-                    ip_check = check_ip_reputation(conn['remote_ip'])
-                    
-                    if ip_check.get('is_malicious'):
-                        print(f"⚠️ MALICIOUS IP DETECTED: {conn['remote_ip']}")
-                        send_alert(
-                            f"Network: Connection to malicious IP {conn['remote_ip']} "
-                            f"(confidence: {ip_check.get('confidence', 0)}%) "
-                            f"by process {conn['process']}",
-                            "high"
-                        )
-                    
-                    if conn['remote_port'] in SUSPICIOUS_PORTS:
-                        print(f"⚠️ SUSPICIOUS PORT: {conn['remote_port']}")
-                        send_alert(
-                            f"Network: Connection to suspicious port {conn['remote_port']} "
-                            f"by process {conn['process']}",
-                            "medium"
-                        )
+                    if send_event("suspicious_connection", payload, risk_score=risk):
+                        print(f"🚨 Suspicious: {conn['remote_ip']}:{conn['remote_port']}")
+                        reported.add(conn_key)
             
-            current_keys = {f"{c['remote_ip']}:{c['remote_port']}" for c in connections}
-            seen_connections = seen_connections.intersection(current_keys)
+            # Clean old reports (keep last 100)
+            if len(reported) > 100:
+                reported = set(list(reported)[-50:])
             
+            time.sleep(10)  # Check every 10 seconds
+            
+        except KeyboardInterrupt:
+            print("\n⛔ Stopped by user")
+            break
         except Exception as e:
             print(f"Error: {e}")
-        
-        time.sleep(5)
+            time.sleep(5)
 
 if __name__ == "__main__":
-    monitor()
+    main()
